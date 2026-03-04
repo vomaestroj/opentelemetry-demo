@@ -1,0 +1,45 @@
+name: Scale Down K8s Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: "K8s deployment name to scale down"
+        required: true
+      port_context:
+        description: "Port context"
+        required: true
+
+jobs:
+  scale-down:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Port - In Progress
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: "Scaling down ${{ inputs.service_name }}..."
+
+      - name: SSH into EC2 and Scale Down
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            kubectl scale deployment/${{ inputs.service_name }} --replicas=0 -n default
+            echo "Waiting for pods to terminate..."
+            kubectl rollout status deployment/${{ inputs.service_name }} -n default --timeout=60s
+
+      - name: Notify Port - Success
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: "SUCCESS"
+          logMessage: "⬇️ ${{ inputs.service_name }} scaled down to 0 replicas"
