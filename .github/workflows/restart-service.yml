@@ -20,6 +20,7 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ fromJson(inputs.port_context).runId }}
           logMessage: "Restarting ${{ inputs.service_name }}..."
+
       - name: SSH into EC2 and Restart Deployment
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -31,6 +32,7 @@ jobs:
             export PATH=$PATH:/usr/local/bin:/snap/bin
             kubectl rollout restart deployment/${{ inputs.service_name }} -n default
             kubectl rollout status deployment/${{ inputs.service_name }} -n default --timeout=60s
+
       - name: Notify Port - Success
         uses: port-labs/port-github-action@v1
         with:
@@ -40,6 +42,7 @@ jobs:
           runId: ${{ fromJson(inputs.port_context).runId }}
           status: "SUCCESS"
           logMessage: "✅ ${{ inputs.service_name }} restarted successfully"
+
       - name: Notify Port - Failure
         if: failure()
         uses: port-labs/port-github-action@v1
