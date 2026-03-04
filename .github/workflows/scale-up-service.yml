@@ -1,0 +1,48 @@
+name: Scale Up K8s Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: "K8s deployment name to scale up"
+        required: true
+      replicas:
+        description: "Number of replicas"
+        required: true
+        default: "1"
+      port_context:
+        description: "Port context"
+        required: true
+
+jobs:
+  scale-up:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Port - In Progress
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: "Scaling up ${{ inputs.service_name }} to ${{ inputs.replicas }} replicas..."
+
+      - name: SSH into EC2 and Scale Up
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            kubectl scale deployment/${{ inputs.service_name }} --replicas=${{ inputs.replicas }} -n default
+            kubectl rollout status deployment/${{ inputs.service_name }} -n default --timeout=60s
+
+      - name: Notify Port - Success
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: "SUCCESS"
+          logMessage: "⬆️ ${{ inputs.service_name }} scaled up to ${{ inputs.replicas }} replicas"
