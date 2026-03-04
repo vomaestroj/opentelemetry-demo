@@ -30,8 +30,26 @@ jobs:
           script: |
             export KUBECONFIG=/home/${{ secrets.EC2_USER }}/.kube/config
             export PATH=$PATH:/usr/local/bin:/snap/bin
-            kubectl rollout restart deployment/${{ inputs.service_name }} -n default
-            kubectl rollout status deployment/${{ inputs.service_name }} -n default --timeout=60s
+
+            SERVICE="${{ inputs.service_name }}"
+
+            # Check current replica count
+            REPLICAS=$(kubectl get deployment/$SERVICE -n default -o jsonpath='{.spec.replicas}')
+            echo "Current replicas for $SERVICE: $REPLICAS"
+
+            # If scaled to 0, bring it back up first
+            if [ "$REPLICAS" -eq 0 ]; then
+              echo "⚠️ Deployment is scaled to 0 — scaling up to 1 before restarting..."
+              kubectl scale deployment/$SERVICE --replicas=1 -n default
+              echo "⏳ Waiting for scale-up..."
+              kubectl rollout status deployment/$SERVICE -n default --timeout=60s
+            fi
+
+            # Now do the rollout restart
+            echo "🔄 Restarting $SERVICE..."
+            kubectl rollout restart deployment/$SERVICE -n default
+            kubectl rollout status deployment/$SERVICE -n default --timeout=60s
+            echo "✅ $SERVICE is back up"
 
       - name: Notify Port - Success
         uses: port-labs/port-github-action@v1
