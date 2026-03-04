@@ -1,5 +1,4 @@
 name: Restart K8s Service
-
 on:
   workflow_dispatch:
     inputs:
@@ -9,7 +8,6 @@ on:
       port_context:
         description: "Port context"
         required: true
-
 jobs:
   restart:
     runs-on: ubuntu-latest
@@ -30,6 +28,8 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            export KUBECONFIG=/home/${{ secrets.EC2_USER }}/.kube/config
+            export PATH=$PATH:/usr/local/bin:/snap/bin
             kubectl rollout restart deployment/${{ inputs.service_name }} -n default
             kubectl rollout status deployment/${{ inputs.service_name }} -n default --timeout=60s
 
@@ -42,3 +42,14 @@ jobs:
           runId: ${{ fromJson(inputs.port_context).runId }}
           status: "SUCCESS"
           logMessage: "✅ ${{ inputs.service_name }} restarted successfully"
+
+      - name: Notify Port - Failure
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: "FAILURE"
+          logMessage: "❌ Failed to restart ${{ inputs.service_name }}"
