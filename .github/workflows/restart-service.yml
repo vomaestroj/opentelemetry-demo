@@ -1,17 +1,23 @@
-name: Restart K8s Service
+name: Restart Service
+
 on:
   workflow_dispatch:
     inputs:
       service_name:
-        description: "K8s deployment name to restart"
+        description: "Service name (must match K8s deployment name)"
         required: true
       port_context:
-        description: "Port context"
+        description: "Port.io context (runId, blueprint, entity)"
         required: true
+
 jobs:
   restart:
     runs-on: ubuntu-latest
+
     steps:
+      # --------------------------------------------------------
+      # 1. Notify Port - In Progress
+      # --------------------------------------------------------
       - name: Notify Port - In Progress
         uses: port-labs/port-github-action@v1
         with:
@@ -19,9 +25,12 @@ jobs:
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           operation: PATCH_RUN
           runId: ${{ fromJson(inputs.port_context).runId }}
-          logMessage: "Restarting ${{ inputs.service_name }}..."
+          logMessage: "🔄 Starting restart of service: ${{ inputs.service_name }}..."
 
-      - name: SSH into EC2 and Restart Deployment
+      # --------------------------------------------------------
+      # 2. SSH into EC2, scale up & rollout restart
+      # --------------------------------------------------------
+      - name: SSH into EC2 and Restart Service
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -30,10 +39,36 @@ jobs:
           script: |
             export KUBECONFIG=/home/${{ secrets.EC2_USER }}/.kube/config
             export PATH=$PATH:/usr/local/bin:/snap/bin
-            kubectl rollout restart deployment/${{ inputs.service_name }} -n default
-            kubectl rollout status deployment/${{ inputs.service_name }} -n default --timeout=60s
 
+            SERVICE="${{ inputs.service_name }}"
+            NAMESPACE="default"
+
+            echo "🔍 Checking deployment: $SERVICE"
+            kubectl get deployment/$SERVICE -n $NAMESPACE
+
+            # Step 1 - Always scale to 1 first (handles replicas=0 edge case)
+            echo "⚙️  Ensuring $SERVICE has at least 1 replica..."
+            kubectl scale deployment/$SERVICE --replicas=1 -n $NAMESPACE
+
+            echo "⏳ Waiting for scale-up to complete..."
+            kubectl rollout status deployment/$SERVICE -n $NAMESPACE --timeout=120s
+
+            # Step 2 - Rollout restart
+            echo "🔄 Performing rollout restart of $SERVICE..."
+            kubectl rollout restart deployment/$SERVICE -n $NAMESPACE
+
+            echo "⏳ Waiting for rollout restart to complete..."
+            kubectl rollout status deployment/$SERVICE -n $NAMESPACE --timeout=120s
+
+            # Step 3 - Print final status
+            echo "✅ Final status:"
+            kubectl get deployment/$SERVICE -n $NAMESPACE
+
+      # --------------------------------------------------------
+      # 3. Notify Port - Success
+      # --------------------------------------------------------
       - name: Notify Port - Success
+        if: success()
         uses: port-labs/port-github-action@v1
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
@@ -43,6 +78,9 @@ jobs:
           status: "SUCCESS"
           logMessage: "✅ ${{ inputs.service_name }} restarted successfully"
 
+      # --------------------------------------------------------
+      # 4. Notify Port - Failure
+      # --------------------------------------------------------
       - name: Notify Port - Failure
         if: failure()
         uses: port-labs/port-github-action@v1
@@ -52,4 +90,4 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ fromJson(inputs.port_context).runId }}
           status: "FAILURE"
-          logMessage: "❌ Failed to restart ${{ inputs.service_name }}"
+          logMessage: "❌ Failed to restart ${{ inputs.service_name }} - check GitHub Actions logs for details"
