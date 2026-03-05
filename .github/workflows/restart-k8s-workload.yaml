@@ -1,0 +1,106 @@
+name: Restart Kubernetes Workload
+
+on:
+  workflow_dispatch:
+    inputs:
+      port_context:
+        required: true
+        description: 'Action and general context (blueprint, entity, run id, etc...)'
+        type: string
+
+jobs:
+  restart-workload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: 'actions/checkout@v4'
+      
+      - name: Inform Port of workflow start
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{fromJson(inputs.port_context).runId}}
+          logMessage: Starting restart of Kubernetes workload ${{ fromJson(inputs.port_context).entity.title }}
+
+      - name: Configure kubectl
+        run: |
+          # NOTE: In production, this should connect to your production cluster with proper SSL verification
+          # For this demo, we're using a local cluster through ngrok tunnel, so we skip TLS verification
+          echo "🔧 Using kubeconfig from GitHub secret..."
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig.yaml
+          export KUBECONFIG=kubeconfig.yaml
+          echo "✅ Kubeconfig configured from secret"
+          echo "📍 Current kubectl context:"
+          kubectl config current-context --insecure-skip-tls-verify
+          echo "📋 Available contexts:"
+          kubectl config get-contexts
+          echo "🔍 Verifying kubectl access..."
+          kubectl cluster-info --request-timeout=10s --insecure-skip-tls-verify
+          echo "✅ kubectl access verified"
+
+      - name: Restart Kubernetes workload
+        run: |
+          export KUBECONFIG=kubeconfig.yaml
+          WORKLOAD_NAME="${{ fromJson(inputs.port_context).entity.title }}"
+          NAMESPACE="${{ fromJson(inputs.port_context).entity.properties.namespace }}"
+          WORKLOAD_TYPE="${{ fromJson(inputs.port_context).entity.properties.kind }}"
+          
+          echo "Restarting $WORKLOAD_TYPE: $WORKLOAD_NAME in namespace: $NAMESPACE"
+          
+          case $WORKLOAD_TYPE in
+            "Deployment")
+              kubectl rollout restart deployment/$WORKLOAD_NAME -n $NAMESPACE --insecure-skip-tls-verify
+              kubectl rollout status deployment/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s --insecure-skip-tls-verify
+              ;;
+            "StatefulSet")
+              kubectl rollout restart statefulset/$WORKLOAD_NAME -n $NAMESPACE --insecure-skip-tls-verify
+              kubectl rollout status statefulset/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s --insecure-skip-tls-verify
+              ;;
+            "DaemonSet")
+              kubectl rollout restart daemonset/$WORKLOAD_NAME -n $NAMESPACE --insecure-skip-tls-verify
+              kubectl rollout status daemonset/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s --insecure-skip-tls-verify
+              ;;
+            *)
+              echo "Unsupported workload type: $WORKLOAD_TYPE"
+              exit 1
+              ;;
+          esac
+          
+      - name: Verify workload health
+        run: |
+          export KUBECONFIG=kubeconfig.yaml
+          WORKLOAD_NAME="${{ fromJson(inputs.port_context).entity.title }}"
+          NAMESPACE="${{ fromJson(inputs.port_context).entity.properties.namespace }}"
+          WORKLOAD_TYPE="${{ fromJson(inputs.port_context).entity.properties.kind }}"
+          
+          echo "Checking health of $WORKLOAD_TYPE: $WORKLOAD_NAME"
+          kubectl get $WORKLOAD_TYPE $WORKLOAD_NAME -n $NAMESPACE --insecure-skip-tls-verify
+          kubectl get pods -l app=$WORKLOAD_NAME -n $NAMESPACE --insecure-skip-tls-verify
+          
+      - name: Inform Port about restart success
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: 'SUCCESS'
+          logMessage: ✅ Successfully restarted Kubernetes workload ${{ fromJson(inputs.port_context).entity.title }}
+          summary: Kubernetes workload restart completed successfully
+
+      - name: Inform Port about restart failure
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: 'FAILURE'
+          logMessage: ❌ Failed to restart Kubernetes workload ${{ fromJson(inputs.port_context).entity.title }}
+          summary: Kubernetes workload restart failed
