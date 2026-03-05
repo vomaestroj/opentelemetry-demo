@@ -41,6 +41,9 @@ jobs:
             export PATH=$PATH:/usr/local/bin:/snap/bin
 
             SERVICE="${{ inputs.service_name }}"
+            SERVICE="${SERVICE/_service/}"
+            echo "🔍 Checking deployment: $SERVICE"
+            
             NAMESPACE="default"
 
             echo "🔍 Checking deployment: $SERVICE"
