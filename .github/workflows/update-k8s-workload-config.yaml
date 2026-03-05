@@ -1,0 +1,127 @@
+name: Update Kubernetes Workload Configuration
+
+on:
+  workflow_dispatch:
+    inputs:
+      port_context:
+        required: true
+        description: 'Action and general context (blueprint, entity, run id, etc...)'
+        type: string
+
+jobs:
+  update-workload-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: 'actions/checkout@v4'
+      
+      - name: Inform Port of workflow start
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{fromJson(inputs.port_context).runId}}
+          logMessage: Starting configuration update for Kubernetes workload ${{ fromJson(inputs.port_context).entity.title }}
+
+      - name: Configure kubectl for local cluster
+        run: |
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig.yaml
+          export KUBECONFIG=kubeconfig.yaml
+          kubectl config current-context
+
+      - name: Update workload configuration
+        run: |
+          WORKLOAD_NAME="${{ fromJson(inputs.port_context).entity.title }}"
+          NAMESPACE="${{ fromJson(inputs.port_context).entity.properties.namespace }}"
+          WORKLOAD_TYPE="${{ fromJson(inputs.port_context).entity.properties.kind }}"
+          MEMORY_LIMIT="${{ fromJson(inputs.port_context).entity.properties.memory_limit }}"
+          CPU_LIMIT="${{ fromJson(inputs.port_context).entity.properties.cpu_limit }}"
+          MEMORY_REQUEST="${{ fromJson(inputs.port_context).entity.properties.memory_request }}"
+          CPU_REQUEST="${{ fromJson(inputs.port_context).entity.properties.cpu_request }}"
+          
+          echo "Updating $WORKLOAD_TYPE: $WORKLOAD_NAME configuration in namespace: $NAMESPACE"
+          echo "Memory Limit: $MEMORY_LIMIT, CPU Limit: $CPU_LIMIT"
+          echo "Memory Request: $MEMORY_REQUEST, CPU Request: $CPU_REQUEST"
+          
+          # Create a patch for resource limits and requests
+          cat > resource-patch.json << EOF
+          {
+            "spec": {
+              "template": {
+                "spec": {
+                  "containers": [
+                    {
+                      "name": "$WORKLOAD_NAME",
+                      "resources": {
+                        "limits": {
+                          "memory": "$MEMORY_LIMIT",
+                          "cpu": "$CPU_LIMIT"
+                        },
+                        "requests": {
+                          "memory": "$MEMORY_REQUEST",
+                          "cpu": "$CPU_REQUEST"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          EOF
+          
+          case $WORKLOAD_TYPE in
+            "Deployment")
+              kubectl patch deployment $WORKLOAD_NAME -n $NAMESPACE --type='merge' -p "$(cat resource-patch.json)"
+              kubectl rollout status deployment/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s
+              ;;
+            "StatefulSet")
+              kubectl patch statefulset $WORKLOAD_NAME -n $NAMESPACE --type='merge' -p "$(cat resource-patch.json)"
+              kubectl rollout status statefulset/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s
+              ;;
+            "DaemonSet")
+              kubectl patch daemonset $WORKLOAD_NAME -n $NAMESPACE --type='merge' -p "$(cat resource-patch.json)"
+              kubectl rollout status daemonset/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s
+              ;;
+            *)
+              echo "Unsupported workload type for configuration update: $WORKLOAD_TYPE"
+              exit 1
+              ;;
+          esac
+          
+      - name: Verify configuration update
+        run: |
+          WORKLOAD_NAME="${{ fromJson(inputs.port_context).entity.title }}"
+          NAMESPACE="${{ fromJson(inputs.port_context).entity.properties.namespace }}"
+          WORKLOAD_TYPE="${{ fromJson(inputs.port_context).entity.properties.kind }}"
+          
+          echo "Checking updated $WORKLOAD_TYPE: $WORKLOAD_NAME"
+          kubectl get $WORKLOAD_TYPE $WORKLOAD_NAME -n $NAMESPACE
+          kubectl describe $WORKLOAD_TYPE $WORKLOAD_NAME -n $NAMESPACE | grep -A 10 "Resources:"
+          
+      - name: Inform Port about config update success
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: 'SUCCESS'
+          logMessage: ✅ Successfully updated Kubernetes workload configuration ${{ fromJson(inputs.port_context).entity.title }}
+          summary: Kubernetes workload configuration update completed successfully
+
+      - name: Inform Port about config update failure
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: 'FAILURE'
+          logMessage: ❌ Failed to update Kubernetes workload configuration ${{ fromJson(inputs.port_context).entity.title }}
+          summary: Kubernetes workload configuration update failed
