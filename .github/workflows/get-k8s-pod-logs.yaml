@@ -1,0 +1,350 @@
+name: Get Kubernetes Pod Logs
+
+on:
+  workflow_dispatch:
+    inputs:
+      port_context:
+        required: true
+        type: string
+        description: "Port context containing entity and runId"
+      inputs:
+        required: false
+        type: string
+        description: "User inputs for the action"
+
+jobs:
+  pod-logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Parse Port context
+        id: parse-context
+        run: |
+          # Debug: Show the raw input
+          echo "Raw port_context input:"
+          echo '${{ inputs.port_context }}'
+          echo ""
+          
+          # Parse with error handling
+          RUN_ID=$(echo '${{ inputs.port_context }}' | jq -r '.runId // empty')
+          ENTITY=$(echo '${{ inputs.port_context }}' | jq -r '.entity // empty')
+          POD_IDENTIFIER=$(echo '${{ inputs.port_context }}' | jq -r '.entity.identifier // empty')
+          POD_TITLE=$(echo '${{ inputs.port_context }}' | jq -r '.entity.title // empty')
+          
+          # Handle Pod Name - extract real pod name from Port identifier
+          # Port identifier format: "pod-name-namespace-cluster" (e.g., "api-backend-7bd58f9457-dhblj-production-minikube-cluster")
+          # Real pod name format: "pod-name" (e.g., "api-backend-7bd58f9457-dhblj")
+          if [[ "$POD_IDENTIFIER" =~ ^(.+)-[^-]+-minikube-cluster$ ]]; then
+            POD_NAME="${BASH_REMATCH[1]}"
+            echo "🔍 Extracted real pod name from Port identifier: $POD_NAME"
+          else
+            POD_NAME="$POD_IDENTIFIER"
+            echo "📍 Using identifier as pod name: $POD_NAME"
+          fi
+          
+          # Handle namespace - get from Port entity properties
+          NAMESPACE=$(echo '${{ inputs.port_context }}' | jq -r '.entity.properties.namespace // empty' 2>/dev/null)
+          if [ -z "$NAMESPACE" ] || [ "$NAMESPACE" = "null" ]; then
+            echo "⚠️ Namespace not found in entity properties, defaulting to production"
+            NAMESPACE="production"
+          fi
+          echo "📍 Using namespace: $NAMESPACE"
+          
+          # Handle cluster - try multiple sources  
+          CLUSTER=$(echo '${{ inputs.port_context }}' | jq -r '.entity.properties.cluster // empty' 2>/dev/null)
+          if [ -z "$CLUSTER" ] || [ "$CLUSTER" = "null" ]; then
+            # Try to extract from pod name or use default
+            CLUSTER="default-cluster"
+            echo "⚠️  Cluster not found in entity properties, using default-cluster"
+          fi
+          
+          # Validate required fields
+          if [ -z "$RUN_ID" ] || [ -z "$POD_NAME" ]; then
+            echo "❌ Error: Missing required fields in port_context"
+            echo "RUN_ID: $RUN_ID"
+            echo "POD_NAME: $POD_NAME"
+            exit 1
+          fi
+          
+          # Set outputs with proper escaping
+          {
+            echo "runId<<EOF"
+            echo "$RUN_ID"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          
+          {
+            echo "entity<<EOF"
+            echo "$ENTITY"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          
+          {
+            echo "podName<<EOF"
+            echo "$POD_NAME"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          
+          {
+            echo "podTitle<<EOF"
+            echo "$POD_TITLE"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          
+          {
+            echo "namespace<<EOF"
+            echo "$NAMESPACE"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          
+          {
+            echo "cluster<<EOF"
+            echo "$CLUSTER"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          
+          # Debug: Show parsed values
+          echo "Parsed values:"
+          echo "RUN_ID: $RUN_ID"
+          echo "POD_IDENTIFIER: $POD_IDENTIFIER"
+          echo "POD_NAME: $POD_NAME"
+          echo "POD_TITLE: $POD_TITLE"
+          echo "NAMESPACE: $NAMESPACE"
+          echo "CLUSTER: $CLUSTER"
+
+      - name: Parse user inputs
+        id: parse-inputs
+        run: |
+          # Debug: Show the raw inputs
+          echo "Raw inputs:"
+          echo '${{ inputs.inputs }}'
+          echo ""
+          
+          if [ -n "${{ inputs.inputs }}" ] && [ "${{ inputs.inputs }}" != "null" ]; then
+            # Parse with error handling
+            CONTAINER=$(echo '${{ inputs.inputs }}' | jq -r '.container // empty' 2>/dev/null || echo "")
+            TAIL=$(echo '${{ inputs.inputs }}' | jq -r '.tail // "200"' 2>/dev/null || echo "200")
+            FOLLOW=$(echo '${{ inputs.inputs }}' | jq -r '.follow // false' 2>/dev/null || echo "false")
+            SINCE=$(echo '${{ inputs.inputs }}' | jq -r '.since // empty' 2>/dev/null || echo "")
+            
+            {
+              echo "container<<EOF"
+              echo "$CONTAINER"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+            
+            {
+              echo "tail<<EOF"
+              echo "$TAIL"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+            
+            {
+              echo "follow<<EOF"
+              echo "$FOLLOW"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+            
+            {
+              echo "since<<EOF"
+              echo "$SINCE"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+          else
+            {
+              echo "container<<EOF"
+              echo ""
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+            
+            {
+              echo "tail<<EOF"
+              echo "200"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+            
+            {
+              echo "follow<<EOF"
+              echo "false"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+            
+            {
+              echo "since<<EOF"
+              echo ""
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+          fi
+          
+          # Debug: Show parsed input values
+          echo "Parsed input values:"
+          echo "CONTAINER: $CONTAINER"
+          echo "TAIL: $TAIL"
+          echo "FOLLOW: $FOLLOW"
+          echo "SINCE: $SINCE"
+
+      - name: Inform Port of workflow start
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ steps.parse-context.outputs.runId }}
+          logMessage: "🚀 Starting pod logs retrieval for ${{ steps.parse-context.outputs.podTitle }} in namespace ${{ steps.parse-context.outputs.namespace }} on cluster ${{ steps.parse-context.outputs.cluster }}..."
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure kubeconfig
+        run: |
+          # Create .kube directory
+          mkdir -p ~/.kube
+          
+          # Check if KUBECONFIG secret is provided
+          if [ -n "${{ secrets.KUBECONFIG }}" ]; then
+            echo "🔧 Using kubeconfig from GitHub secret..."
+            echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+            chmod 600 ~/.kube/config
+            echo "✅ Kubeconfig configured from secret"
+          else
+            echo "❌ No KUBECONFIG secret found!"
+            echo "Please add your kubeconfig as a GitHub secret named 'KUBECONFIG'"
+            echo "You can generate it by running: cat ~/.kube/config | base64 -w 0"
+            exit 1
+          fi
+          
+          # Display current context
+          echo "📍 Current kubectl context:"
+          kubectl config current-context || echo "No context set"
+          
+          # Show available contexts
+          echo "📋 Available contexts:"
+          kubectl config get-contexts || echo "No contexts available"
+
+      - name: Verify kubectl access
+        run: |
+          echo "🔍 Verifying kubectl access..."
+          echo "📍 Cluster info:"
+          kubectl cluster-info --request-timeout=10s --insecure-skip-tls-verify || echo "⚠️  Could not get cluster info"
+          echo ""
+          echo "📋 Available pods in namespace ${{ steps.parse-context.outputs.namespace }}:"
+          kubectl get pods -n ${{ steps.parse-context.outputs.namespace }} --no-headers --insecure-skip-tls-verify | head -5 || echo "❌ No pods found or access denied"
+          echo "✅ kubectl access verified"
+
+      - name: Check if pod exists
+        id: check-pod
+        run: |
+          if kubectl get pod ${{ steps.parse-context.outputs.podName }} -n ${{ steps.parse-context.outputs.namespace }} --insecure-skip-tls-verify >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Pod ${{ steps.parse-context.outputs.podName }} found in namespace ${{ steps.parse-context.outputs.namespace }}"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "❌ Pod ${{ steps.parse-context.outputs.podName }} not found in namespace ${{ steps.parse-context.outputs.namespace }}"
+          fi
+
+      - name: Get pod information
+        if: steps.check-pod.outputs.exists == 'true'
+        run: |
+          echo "📋 Pod Information:"
+          kubectl describe pod ${{ steps.parse-context.outputs.podName }} -n ${{ steps.parse-context.outputs.namespace }} --insecure-skip-tls-verify | head -20
+
+      - name: Stream pod logs to Port
+        if: steps.check-pod.outputs.exists == 'true'
+        shell: bash
+        run: |
+          RUN_ID="${{ steps.parse-context.outputs.runId }}"
+          POD_NAME="${{ steps.parse-context.outputs.podName }}"
+          NAMESPACE="${{ steps.parse-context.outputs.namespace }}"
+          CONTAINER="${{ steps.parse-inputs.outputs.container }}"
+          TAIL="${{ steps.parse-inputs.outputs.tail }}"
+          FOLLOW="${{ steps.parse-inputs.outputs.follow }}"
+          SINCE="${{ steps.parse-inputs.outputs.since }}"
+
+          # Build kubectl logs command
+          KUBECTL_CMD="kubectl logs $POD_NAME -n $NAMESPACE --insecure-skip-tls-verify"
+          
+          if [ -n "$CONTAINER" ]; then
+            KUBECTL_CMD="$KUBECTL_CMD -c $CONTAINER"
+          fi
+          
+          if [ -n "$TAIL" ]; then
+            KUBECTL_CMD="$KUBECTL_CMD --tail=$TAIL"
+          fi
+          
+          if [ -n "$SINCE" ]; then
+            KUBECTL_CMD="$KUBECTL_CMD --since=$SINCE"
+          fi
+
+          echo "🔍 Executing: $KUBECTL_CMD"
+
+          # Execute kubectl logs and capture output
+          set +e
+          echo "📄 Retrieving logs..."
+          LOG_OUTPUT=$($KUBECTL_CMD 2>&1)
+          LOG_STATUS=$?
+          set -e
+
+          # Save logs to file for the summary
+          if [ $LOG_STATUS -eq 0 ]; then
+            echo "SUCCESS" > status.txt
+            echo "✅ Logs retrieved successfully"
+            # Save logs to file (truncate if too long)
+            echo "$LOG_OUTPUT" | head -100 > pod_logs.txt
+            echo "📊 Retrieved $(echo "$LOG_OUTPUT" | wc -l) lines of logs"
+          else
+            echo "FAILURE" > status.txt
+            echo "❌ Failed to retrieve logs (exit code: $LOG_STATUS)"
+            echo "Error: $LOG_OUTPUT" > pod_logs.txt
+          fi
+
+      - name: Handle pod not found
+        if: steps.check-pod.outputs.exists == 'false'
+        run: |
+          echo "❌ Pod not found - cannot retrieve logs"
+          echo "FAILURE" > status.txt
+          echo "Pod not found in namespace ${{ steps.parse-context.outputs.namespace }}" > pod_logs.txt
+
+      - name: Prepare summary with logs
+        if: always()
+        id: prepare-summary
+        run: |
+          if [ -f pod_logs.txt ]; then
+            LOGS_CONTENT=$(cat pod_logs.txt)
+            # Create summary with logs
+            SUMMARY="## 📋 Pod Logs for ${{ steps.parse-context.outputs.podName }}
+
+          **Namespace:** ${{ steps.parse-context.outputs.namespace }}
+          **Status:** $(cat status.txt 2>/dev/null || echo 'UNKNOWN')
+
+          ### 📄 Logs:
+          \`\`\`
+          $LOGS_CONTENT
+          \`\`\`"
+          else
+            SUMMARY="Failed to retrieve logs for pod ${{ steps.parse-context.outputs.podName }}"
+          fi
+          
+          # Save summary to output (escape for GitHub Actions)
+          {
+            echo "summary<<EOF"
+            echo "$SUMMARY"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Inform Port about result
+        if: always()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ steps.parse-context.outputs.runId }}
+          status: ${{ steps.check-pod.outputs.exists == 'true' && 'SUCCESS' || 'FAILURE' }}
+          logMessage: ${{ steps.check-pod.outputs.exists == 'true' && '✅ Pod logs retrieval completed successfully!' || '❌ Pod logs retrieval failed - pod not found' }}
+          summary: ${{ steps.prepare-summary.outputs.summary }}
