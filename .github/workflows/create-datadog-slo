@@ -1,0 +1,164 @@
+name: Create Datadog SLO
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        required: true
+        type: string
+      description:
+        required: false
+        type: string
+      slo_type:
+        required: true
+        type: string
+      target_threshold:
+        required: true
+        type: string
+      warning_threshold:
+        required: false
+        type: string
+      timeframe:
+        required: true
+        type: string
+      tags:
+        required: false
+        type: string
+      monitor_ids:
+        required: false
+        type: string
+      numerator_query:
+        required: false
+        type: string
+      denominator_query:
+        required: false
+        type: string
+      port_context:
+        required: true
+        type: string
+
+jobs:
+  create-slo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse Port Context
+        id: context
+        run: |
+          echo "RUN_ID=$(echo '${{ inputs.port_context }}' | jq -r '.runId')" >> $GITHUB_OUTPUT
+          echo "BLUEPRINT=$(echo '${{ inputs.port_context }}' | jq -r '.blueprint')" >> $GITHUB_OUTPUT
+
+      - name: Notify Port - In Progress
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ steps.context.outputs.RUN_ID }}
+          logMessage: "Creating SLO '${{ inputs.name }}' in Datadog..."
+
+      - name: Build SLO Payload
+        id: build
+        run: |
+          # Parse tags and monitor_ids from JSON strings
+          TAGS='${{ inputs.tags }}'
+          if [ -z "$TAGS" ] || [ "$TAGS" == "null" ]; then TAGS="[]"; fi
+
+          MONITOR_IDS='${{ inputs.monitor_ids }}'
+          if [ -z "$MONITOR_IDS" ] || [ "$MONITOR_IDS" == "null" ]; then MONITOR_IDS="[]"; fi
+
+          # Build thresholds
+          WARNING="${{ inputs.warning_threshold }}"
+          THRESHOLDS=$(jq -n \
+            --argjson target "${{ inputs.target_threshold }}" \
+            --arg timeframe "${{ inputs.timeframe }}" \
+            --arg warning "$WARNING" \
+            'if $warning != "" and $warning != "null" then
+              [{ timeframe: $timeframe, target: $target, warning: ($warning | tonumber) }]
+            else
+              [{ timeframe: $timeframe, target: $target }]
+            end')
+
+          if [ "${{ inputs.slo_type }}" == "metric" ]; then
+            jq -n \
+              --arg name "${{ inputs.name }}" \
+              --arg desc "${{ inputs.description }}" \
+              --argjson thresholds "$THRESHOLDS" \
+              --argjson tags "$TAGS" \
+              --arg numerator "${{ inputs.numerator_query }}" \
+              --arg denominator "${{ inputs.denominator_query }}" \
+              '{
+                type: "metric",
+                name: $name,
+                description: $desc,
+                thresholds: $thresholds,
+                tags: $tags,
+                query: {
+                  numerator: $numerator,
+                  denominator: $denominator
+                }
+              }' > /tmp/slo_payload.json
+          else
+            jq -n \
+              --arg name "${{ inputs.name }}" \
+              --arg desc "${{ inputs.description }}" \
+              --argjson thresholds "$THRESHOLDS" \
+              --argjson tags "$TAGS" \
+              --argjson monitor_ids "$MONITOR_IDS" \
+              '{
+                type: "monitor",
+                name: $name,
+                description: $desc,
+                thresholds: $thresholds,
+                tags: $tags,
+                monitor_ids: $monitor_ids
+              }' > /tmp/slo_payload.json
+          fi
+
+          echo "Payload:"
+          cat /tmp/slo_payload.json
+
+      - name: Create SLO via Datadog API
+        id: create_slo
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://api.datadoghq.com/api/v1/slo" \
+            -H "Content-Type: application/json" \
+            -H "DD-API-KEY: ${{ secrets.DD_API_KEY }}" \
+            -H "DD-APPLICATION-KEY: ${{ secrets.DD_APP_KEY }}" \
+            -d @/tmp/slo_payload.json)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "::error::Datadog API error ($HTTP_CODE): $BODY"
+            exit 1
+          fi
+
+          SLO_ID=$(echo "$BODY" | jq -r '.data[0].id')
+          echo "SLO_ID=$SLO_ID" >> $GITHUB_OUTPUT
+          echo "SLO created: $SLO_ID"
+
+      - name: Notify Port - Complete
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ steps.context.outputs.RUN_ID }}
+          logMessage: |
+            SLO created successfully!
+            ID: ${{ steps.create_slo.outputs.SLO_ID }}
+            View in Datadog: https://app.datadoghq.com/slo?slo_id=${{ steps.create_slo.outputs.SLO_ID }}
+          link: '["https://app.datadoghq.com/slo?slo_id=${{ steps.create_slo.outputs.SLO_ID }}"]'
+
+      - name: Handle Failure
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ steps.context.outputs.RUN_ID }}
+          logMessage: "Failed to create SLO. Check workflow logs."
+          status: "FAILURE"
